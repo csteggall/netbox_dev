@@ -1,10 +1,10 @@
 """
 get from user:
--circuit reference
--order stage
+X-circuit reference
+X-order stage
     -provisioning
     -installed
--infrastructure:
+X-infrastructure:
     -copper (Cisco),
     -GPON (Ubiquity),
     -GPON (Zyxel),
@@ -26,18 +26,23 @@ X-circuit speeds not on A end
 X-circuit Z end termination has device with type CPE connected
 X-interface is Y-ETH
 
--CPE has tenant
--CPE has site
--CPE has location
--CPE of type DX3301-T0 or EX5601
--CPE has serial number
--CPE has role CPE-Business or CPE-Residential
--CPE has platform AVSystem
--CPE has Status Staged
--CPE has primary ip address
+X-CPE has tenant
+X-CPE has site
+X-CPE has location
+X-CPE of type DX3301-T0 or EX5601
+X-CPE has serial number
+X-CPE has role CPE-Business or CPE-Residential
+X-CPE has platform AVSystem
+X-CPE has Status Staged
+X-CPE has primary ip address
 
--Y-ETH has ip address assigned
+X-Y-ETH has ip address assigned
 -IP address is /32
+
+X-vlan had circuit ref as name
+-vlan has tenant
+-vlan has site
+    - site matches circuit site
 
 -untagged vlan on Y-ETH
 -untagged vlan on ds switch SVI
@@ -122,6 +127,11 @@ class CircuitCheckingScript(Script):
         'cpe-residential',
     ]
 
+    cpe_models = [
+        'dx3301-t0',
+        'ex5601-t0'
+    ]
+
     circuit = ObjectVar(
         description="Select circuit to check",
         model=Circuit
@@ -149,13 +159,23 @@ class CircuitCheckingScript(Script):
     )
 
 
-    def get_cpe(self, circuit):
+    def get_vlan(self, circuit):
         """
-        get cpe from circuit
-        """
+        vlan has circuit ID as name
 
-        cpe = circuit.termination_z.link_peers[0].device
-        return cpe
+        return: vlan
+        """
+        try:
+            vlan = VLAN.objects.get(name=circuit.cid)
+        except VLAN.DoesNotExist:
+            self.log_failure(
+                f"vlan with name {circuit.cid} not found"
+            )
+            return
+        self.log_success(
+            f"vlan: {vlan.name} found"
+        )
+        return vlan
 
 
     def has_image(self, device):
@@ -174,15 +194,15 @@ class CircuitCheckingScript(Script):
                 f"{device.role} has no associated images".lower()
             )
 
-    def has_tenant(self, netbox_object):
+    def has_tenant(self, netbox_object, object_type):
         """
         test netbox object has a tenant
         """
         if netbox_object.tenant:
-            self.log_success(f"{netbox_object} has tenant:"
+            self.log_success(f"{object_type} has tenant:"
                              f" {netbox_object.tenant}")
         else:
-            self.log_failure(f"{object} has no tenant")
+            self.log_failure(f"{object_type} has no tenant")
 
 
     def test_a_termination(self, circuit):
@@ -350,6 +370,12 @@ class CircuitCheckingScript(Script):
                     f"circuit is in an active state"
                 )
 
+    def test_circuit_tenant(self, circuit):
+        """
+        circuit has tenant
+        """
+        self.has_tenant(circuit, 'circuit')
+
 
     def test_circuit_type(self, circuit):
         """
@@ -363,12 +389,148 @@ class CircuitCheckingScript(Script):
             )
 
 
-    def test_image_cpe(self, circuit):
+    def test_cpe_image(self, cpe):
         """
         cpe has an uploaded image
         """
-        device = circuit.termination_z.link_peers[0].device
-        self.has_image(device)
+        self.has_image(cpe)
+
+
+    def test_cpe_ipaddr(self, cpe):
+        """
+        cpe has ip address primary ip address that is assigned to y-eth
+        """
+        ip_addr = cpe.primary_ip4
+        if not ip_addr:
+            self.log_failure(
+                f"cpe has no primary ip address"
+            )
+        else:
+            self.log_success(
+                f"cpe has the priamry ip address: {ip_addr}"
+            )
+            ip_interface = ip_addr.assigned_object
+            if not ip_interface:
+                self.log_failure(
+                    f"ip address not assigned to interface"
+                )
+            elif ip_interface.name != 'Y-ETH':
+                self.log_failure(
+                    f"primary ip should not be assigned to {ip_interface.name}"
+                )
+            else:
+                self.log_success(
+                    f"cpe primary ip address is assigned to {ip_interface.name}"
+                )
+
+
+    def test_cpe_platform(self, cpe):
+        """
+        cpe has platform AVS
+        """
+        if not cpe.platform:
+            self.log_failure(
+                f"avsystem is not set as cpe platform"
+            )
+        elif cpe.platform.slug != 'avsytems':
+            self.log_failure(
+                f"avsystem is not set as cpe platform"
+            )
+        else:
+            self.log_success(
+                f"avsystem is set as cpe platform"
+            )
+
+
+    def test_cpe_role(self, cpe, ):
+        """
+        cpe has correct role
+        """
+        if cpe.device_role.slug not in self.cpe_roles:
+            self.log_failure(
+                f"{cpe.device_role} is not a valid device role"
+            )
+        else:
+            self.log_success(
+                f"{cpe.device_role} is a valid device role"
+            )
+
+
+    def test_cpe_serial(self, cpe):
+        """
+        cpe has serial number
+        """
+        if not cpe.serial:
+            self.log_failure(
+                f"cpe has no serial number"
+            )
+        else:
+            self.log_success(
+                f"cpe has serial number: {cpe.serial}"
+            )
+
+
+    def test_cpe_site_and_locatoin(self, cpe):
+        """
+        cpe has site and location
+        """
+        if not cpe.site:
+            self.log_failure(
+                f"cpe not assigned to site"
+            )
+        elif not cpe.location:
+            self.log_failure(
+                f"cpe not assigned to location"
+            )
+        else:
+            self.log_success(
+                f"cpe has site: {cpe.site} and location: {cpe.location}"
+            )
+
+
+    def test_cpe_status(self, cpe, install_stage):
+        """
+        cpe status is staged if provisioning or active if installed
+        """
+        if install_stage == 'provisioning':
+            if cpe.status != 'planned':
+                self.log_failure(
+                    f"cpe is in {cpe.status} state, should be in "
+                    f"staged"
+                )
+            else:
+                self.log_success('cpe is in planned state')
+        elif install_stage == 'installed':
+            if cpe.status != 'active':
+                self.log_failure(
+                    f"cpe is in {cpe.status} state, should be active"
+                )
+            else:
+                self.log_success(
+                    f"cpe is in an active state"
+                )
+
+
+    def test_cpe_tenant(self, cpe):
+        """
+        cpe has tenant
+        """
+        self.has_tenant(cpe, 'cpe')
+
+
+    def test_cpe_type(self, cpe):
+        """
+        cpe type is in standard list
+        """
+        if cpe.device_type.slug not in self.cpe_models:
+            self.log_failure(
+                f"{cpe.device_type} is not a standard issue on-net broadband cpe "
+                f"model"
+            )
+        else:
+            self.log_success(
+                f"cpe is of type: {cpe.device_type}"
+            )
 
 
     def test_libre_id(self, circuit):
@@ -385,6 +547,12 @@ class CircuitCheckingScript(Script):
                 f"device has libre id: {cpe.cf['libre_id']}"
             )
 
+    def test_vlan_tenant(self, vlan):
+        """
+        cpe has tenant
+        """
+        self.has_tenant(vlan, 'vlan')
+
 
     def test_z_termination(self, circuit):
         """
@@ -398,20 +566,22 @@ class CircuitCheckingScript(Script):
             self.log_failure(
                 f'no Z end termination device',
             )
-        link_peer = circuit.termination_z.link_peers[0]
-        if not str(link_peer.device.role.slug) in self.cpe_roles:
-            self.log_failure(
-                f'{link_peer.device.role} is not a valid cpe role'
-            )
-        elif not str(link_peer.name) == 'Y-ETH':
-            self.log_failure(
-                f"interface is type {link_peer.name}, should be Y-ETH"
-            )
         else:
-            self.log_success(
-                f'z end termination device has a valid cpe '
-                'role',
-            )
+            link_peer = circuit.termination_z.link_peers[0]
+            if not str(link_peer.device.role.slug) in self.cpe_roles:
+                self.log_failure(
+                    f'{link_peer.device.role} is not a valid cpe role'
+                )
+            elif not str(link_peer.name) == 'Y-ETH':
+                self.log_failure(
+                    f"interface is type {link_peer.name}, should be Y-ETH"
+                )
+            else:
+                self.log_success(
+                    f'z end termination device has a valid cpe '
+                    'role',
+                )
+            return link_peer
 
 
     def run(self, data, commit):
@@ -431,25 +601,39 @@ class CircuitCheckingScript(Script):
 
             """circuit and termination checks"""
             self.test_circuit_ref(circuit)
-            self.has_tenant(circuit)
+            self.test_circuit_tenant(circuit)
             self.test_circuit_type(circuit)
             self.test_circuit_provider(circuit)
             self.test_circuit_speeds(circuit)
             self.test_a_termination(circuit)
-            self.test_z_termination(circuit)
+            link_peer = self.test_z_termination(circuit)
             self.test_circuit_status(circuit, install_stage)
 
             """cpe checks"""
+            if link_peer:
+                cpe = link_peer.device
+                self.test_cpe_tenant(cpe)
+                self.test_cpe_site_and_locatoin(cpe)
+                self.test_cpe_type(cpe)
+                self.test_cpe_serial(cpe)
+                self.test_cpe_ipaddr(cpe)
+                self.test_cpe_platform(cpe)
+                self.test_cpe_role(cpe)
+                self.test_circuit_status(circuit, install_stage)
+
+            """vlan checks"""
+            vlan = self.get_vlan(circuit)
+            if vlan:
+                self.test_vlan_tenant(vlan)
 
 
         elif install_stage == 'installed':
 
             self.test_circuit_install_date(circuit)
             self.test_libre_id(circuit)
-            self.test_image_cpe(circuit)
+            self.test_cpe_image(circuit)
             self.test_circuit_status(circuit, install_stage)
 
 
-
+        """complete"""
         self.log_info(f"completed all checks for circuit: {circuit}.")
-2
