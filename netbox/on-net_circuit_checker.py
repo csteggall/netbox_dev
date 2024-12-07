@@ -40,7 +40,7 @@ X-Y-ETH has ip address assigned
 -IP address is /32
 
 X-vlan had circuit ref as name
--vlan has tenant
+X-vlan has tenant
 -vlan has site
     - site matches circuit site
 
@@ -159,6 +159,19 @@ class CircuitCheckingScript(Script):
     )
 
 
+    def get_cpe(self, circuit):
+        """
+        get cpe object
+
+        return: cpe
+        """
+        if not circuit.termination_z.link_peers:
+            return
+
+        cpe = circuit.termination_z.link_peers[0].device
+        return cpe
+
+
     def get_vlan(self, circuit):
         """
         vlan has circuit ID as name
@@ -178,7 +191,7 @@ class CircuitCheckingScript(Script):
         return vlan
 
 
-    def has_image(self, device):
+    def _has_image(self, device):
         """
         test dcim object for uploaded images
         """
@@ -189,20 +202,57 @@ class CircuitCheckingScript(Script):
                 f"{str(device.role).lower()} has images:"
                 f" {', '.join(image_names)} "
             )
+            return True
         else:
             self.log_failure(
                 f"{device.role} has no associated images".lower()
             )
+            return False
 
-    def has_tenant(self, netbox_object, object_type):
+
+    def _has_location(self, netbox_object, object_type):
         """
-        test netbox object has a tenant
+        netbox object has a location
+        """
+        if not netbox_object.location:
+            self.log_failure(
+                f"{object_type} not assigned to location"
+            )
+            return False
+        else:
+            self.log_success(
+                f"{object_type} has location: {netbox_object.location}"
+            )
+            return True
+
+
+    def _has_site(self, netbox_object, object_type):
+        """
+        netbox object has a site
+        """
+        if not netbox_object.site:
+            self.log_failure(
+                f"{object_type} not assigned to site"
+            )
+            return False
+        else:
+            self.log_success(
+                f"{object_type} has location: {netbox_object.location}"
+            )
+            return True
+
+
+    def _has_tenant(self, netbox_object, object_type):
+        """
+        netbox object has a tenant
         """
         if netbox_object.tenant:
             self.log_success(f"{object_type} has tenant:"
                              f" {netbox_object.tenant}")
+            return True
         else:
             self.log_failure(f"{object_type} has no tenant")
+            return False
 
 
     def test_a_termination(self, circuit):
@@ -374,7 +424,7 @@ class CircuitCheckingScript(Script):
         """
         circuit has tenant
         """
-        self.has_tenant(circuit, 'circuit')
+        self._has_tenant(circuit, 'circuit')
 
 
     def test_circuit_type(self, circuit):
@@ -393,7 +443,7 @@ class CircuitCheckingScript(Script):
         """
         cpe has an uploaded image
         """
-        self.has_image(cpe)
+        self._has_image(cpe)
 
 
     def test_cpe_ipaddr(self, cpe):
@@ -470,22 +520,12 @@ class CircuitCheckingScript(Script):
             )
 
 
-    def test_cpe_site_and_locatoin(self, cpe):
+    def test_cpe_site_and_location(self, cpe):
         """
         cpe has site and location
         """
-        if not cpe.site:
-            self.log_failure(
-                f"cpe not assigned to site"
-            )
-        elif not cpe.location:
-            self.log_failure(
-                f"cpe not assigned to location"
-            )
-        else:
-            self.log_success(
-                f"cpe has site: {cpe.site} and location: {cpe.location}"
-            )
+        if self._has_site(cpe, 'site'):
+            self._has_location(cpe, 'location')
 
 
     def test_cpe_status(self, cpe, install_stage):
@@ -515,7 +555,7 @@ class CircuitCheckingScript(Script):
         """
         cpe has tenant
         """
-        self.has_tenant(cpe, 'cpe')
+        self._has_tenant(cpe, 'cpe')
 
 
     def test_cpe_type(self, cpe):
@@ -533,11 +573,10 @@ class CircuitCheckingScript(Script):
             )
 
 
-    def test_libre_id(self, circuit):
+    def test_libre_id(self, cpe):
         """
         cpe has a libre id
         """
-        cpe = circuit.termination_z.link_peers[0].device
         if not cpe.cf['libre_id']:
             self.log_failure(
                 f"cpe has no libre id"
@@ -551,7 +590,7 @@ class CircuitCheckingScript(Script):
         """
         cpe has tenant
         """
-        self.has_tenant(vlan, 'vlan')
+        self._has_tenant(vlan, 'vlan')
 
 
     def test_z_termination(self, circuit):
@@ -613,7 +652,7 @@ class CircuitCheckingScript(Script):
             if link_peer:
                 cpe = link_peer.device
                 self.test_cpe_tenant(cpe)
-                self.test_cpe_site_and_locatoin(cpe)
+                self.test_cpe_site_and_location(cpe)
                 self.test_cpe_type(cpe)
                 self.test_cpe_serial(cpe)
                 self.test_cpe_ipaddr(cpe)
@@ -629,9 +668,10 @@ class CircuitCheckingScript(Script):
 
         elif install_stage == 'installed':
 
+            cpe = self.get_cpe(circuit)
             self.test_circuit_install_date(circuit)
-            self.test_libre_id(circuit)
-            self.test_cpe_image(circuit)
+            self.test_libre_id(cpe)
+            self.test_cpe_image(cpe)
             self.test_circuit_status(circuit, install_stage)
 
 
