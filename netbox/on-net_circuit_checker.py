@@ -4,7 +4,7 @@ X-circuit reference
 X-order stage
     -provisioning
     -installed
-X-infrastructure:
+X-architecture:
     -copper (Cisco),
     -GPON (Ubiquity),
     -GPON (Zyxel),
@@ -37,18 +37,18 @@ X-CPE has Status Staged
 X-CPE has primary ip address
 
 X-Y-ETH has ip address assigned
--IP address is /32
+X-IP address is /32
 
 X-vlan had circuit ref as name
 X-vlan has tenant
--vlan has site
+X-vlan has site
     - site matches circuit site
 
--untagged vlan on Y-ETH
--untagged vlan on ds switch SVI
+X-untagged vlan on Y-ETH
+X-untagged vlan on ds switch SVI
 
--circuit A end termination has device of type onu, as switch, ds switch, ptp
-or media converter
+X-circuit A end termination has device of type ubiq onu, zyxel onu,
+floor-port, ptp or media convert
 
 if ONU:
 -onu has tenant
@@ -103,13 +103,12 @@ been passed
 -provisiong script have a 'by-pass' checkbox so can run the installed script
 even if it has failed
 """
-
 import re
 
 from extras.scripts import Script, ChoiceVar, ObjectVar
-from circuits.choices import CircuitStatusChoices, CircuitTerminationPortSpeedChoices
+from circuits.choices import CircuitStatusChoices
 from circuits.models import Circuit, CircuitTermination, CircuitType
-from dcim.models import Interface, Device, Site, SiteGroup
+from dcim.models import Interface, Device, DeviceRole, Site, SiteGroup
 from ipam.models import VLAN
 from extras.scripts import ChoiceVar
 
@@ -119,6 +118,7 @@ class CircuitCheckingScript(Script):
         name = "check on-net circuit provision"
         description = "check YDS circuit provision follows the data model"
 
+    """ class variables """
     circuit_types = ['on-net-broadband']
 
     cpe_roles = [
@@ -132,21 +132,41 @@ class CircuitCheckingScript(Script):
         'ex5601-t0'
     ]
 
+    demarc_devices = {
+        'ethernet': ['floor-port'],
+        'gpon_ubiquity': ['uf-loco'],
+        'gpon_zyxel': ['pmg1005-t20c'],
+        'gpen_mikrotik': ['gpen21'],
+        'wifi': []
+    }
+
+    """ forms """
     circuit = ObjectVar(
         description="Select circuit to check",
         model=Circuit
     )
 
-    infrastructure = ChoiceVar(
+    architecture = ChoiceVar(
         choices=(
-            ('copper_cisco', 'copper (Cisco)'),
+            ('ethernet', 'Ethernet (Cisco)'),
             ('gpon_ubiquity', 'GPON (Ubiquity)'),
             ('gpon_zyxel', 'GPON (Zyxel)'),
             ('gpen_mikrotik', 'GPEN (Mikrotik)'),
             ('wifi', 'WI-FI'),
         ),
-            label="Network Infrastructure",
+            label="Network Architecture",
             required=True
+    )
+
+    distribution_switch = ObjectVar(
+        label="Distribution Switch",
+        description="Select a distribution switch",
+        model=Device,
+        query_params={
+            'role_id': DeviceRole.objects.get(
+                slug='switch').id
+        },
+        required=False
     )
 
     install_stage = ChoiceVar(
@@ -158,6 +178,105 @@ class CircuitCheckingScript(Script):
             required=True
     )
 
+    """ helper functions for reusable code """
+
+    def has_image(self, device):
+        """
+        test dcim object for uploaded images
+        """
+        associated_images = device.images.all()
+        if associated_images:
+            image_names = [str(image) for image in associated_images]
+            self.log_success(
+                f"{str(device.role).lower()} has associated images::"
+                f" {', '.join(image_names)} "
+            )
+            return True
+        else:
+            self.log_failure(
+                f"{device.role} has no associated images".lower()
+            )
+            return False
+
+
+    def has_location(self, netbox_object, object_type: str):
+        """
+        netbox object has a location
+        """
+        if not netbox_object.location:
+            self.log_failure(
+                f"{object_type} not assigned to location"
+            )
+            return False
+        else:
+            self.log_success(
+                f"{object_type} has location: {netbox_object.location}"
+            )
+            return True
+
+
+    def has_site(self, netbox_object, object_type: str):
+        """
+        netbox object has a site
+        """
+        if not netbox_object.site:
+            self.log_failure(
+                f"{object_type} not assigned to site"
+            )
+            return False
+        else:
+            self.log_success(
+                f"{object_type} has site: {netbox_object.site}"
+            )
+            return True
+
+
+    def has_tenant(self, netbox_object, object_type: str):
+        """
+        netbox object has a tenant
+        """
+        if netbox_object.tenant:
+            self.log_success(f"{object_type} has tenant:"
+                             f" {netbox_object.tenant}")
+            return True
+        else:
+            self.log_failure(f"{object_type} has no tenant")
+            return False
+
+
+    def has_vlan(self, device, interface: str, vlan, vlan_type: str):
+        """
+        check if interface has either tagged or untagged vlan
+        """
+        try:
+            interface = Interface.objects.filter(
+                device=device).get(
+                name=interface
+            )
+        except Interface.DoesNotExist:
+            self.log_failure(
+                f"{interface} interface not found"
+            )
+            return
+
+        vlan_assigned = getattr(interface, vlan_type, None)
+
+        if not vlan_assigned:
+            self.log_failure(
+                f"{device.role} interface does not have "
+                f"{vlan_type.replace('_', ' ')} "
+            )
+        elif vlan_assigned.id == vlan.id:
+            self.log_success(
+                f"{device.role} interface has the untagged vlan: {vlan.vid}"
+            )
+        else:
+            self.log_failure(
+                f"{device.role} interface does not have untagged vlan"
+            )
+
+
+    """ get object functions """
 
     def get_cpe(self, circuit):
         """
@@ -165,6 +284,8 @@ class CircuitCheckingScript(Script):
 
         return: cpe
         """
+        if not circuit.termination_z:
+            return
         if not circuit.termination_z.link_peers:
             return
 
@@ -191,77 +312,33 @@ class CircuitCheckingScript(Script):
         return vlan
 
 
-    def _has_image(self, device):
-        """
-        test dcim object for uploaded images
-        """
-        associated_images = device.images.all()
-        if associated_images:
-            image_names = [str(image) for image in associated_images]
-            self.log_success(
-                f"{str(device.role).lower()} has images:"
-                f" {', '.join(image_names)} "
-            )
-            return True
-        else:
-            self.log_failure(
-                f"{device.role} has no associated images".lower()
-            )
-            return False
+    """ test functions """
 
-
-    def _has_location(self, netbox_object, object_type):
+    def test_a_termination(self, circuit, architecture: str,):
         """
-        netbox object has a location
-        """
-        if not netbox_object.location:
-            self.log_failure(
-                f"{object_type} not assigned to location"
-            )
-            return False
-        else:
-            self.log_success(
-                f"{object_type} has location: {netbox_object.location}"
-            )
-            return True
-
-
-    def _has_site(self, netbox_object, object_type):
-        """
-        netbox object has a site
-        """
-        if not netbox_object.site:
-            self.log_failure(
-                f"{object_type} not assigned to site"
-            )
-            return False
-        else:
-            self.log_success(
-                f"{object_type} has location: {netbox_object.location}"
-            )
-            return True
-
-
-    def _has_tenant(self, netbox_object, object_type):
-        """
-        netbox object has a tenant
-        """
-        if netbox_object.tenant:
-            self.log_success(f"{object_type} has tenant:"
-                             f" {netbox_object.tenant}")
-            return True
-        else:
-            self.log_failure(f"{object_type} has no tenant")
-            return False
-
-
-    def test_a_termination(self, circuit):
-        """
-        circuit has a end termination
+        circuit has a end termination to correct demarc depending on network
+        architecture
         """
         if not circuit.termination_a:
             self.log_failure(
-                f"no A end termination"
+                f"A end termination not found"
+            )
+            return
+        demarc_device = circuit.termination_a.link_peers
+        if not demarc_device:
+            self.log_failure(
+                f"A end device not found"
+            )
+            return
+
+        device_type = circuit.termination_a.link_peers[0].device.device_type
+        if device_type.slug == self.demarc_devices[architecture]:
+            self.log_success(
+                f"A end termination device is correct: {device_type} "
+            )
+        else:
+            self.log_failure(
+                f"A end termination device should not be {device_type}"
             )
 
 
@@ -275,7 +352,7 @@ class CircuitCheckingScript(Script):
             )
         else:
             self.log_failure(
-                'no install date'
+                'circuit has no install date'
             )
 
     def test_circuit_provider(self, circuit):
@@ -385,20 +462,20 @@ class CircuitCheckingScript(Script):
                 )
             else:
                 self.log_failure(
-                    "no upload on Z end"
+                    "upload speed not on Z end"
                 )
             if circuit.termination_z.port_speed:
                 self.log_success(
                     f"{int(circuit.termination_z.port_speed/1000)} mbs "
-                    f"download on Z end"
+                    f"download speed on Z end"
                 )
             else:
                 self.log_failure(
-                    "no download on Z end"
+                    "download speed not on Z end"
                 )
 
 
-    def test_circuit_status(self, circuit, install_stage):
+    def test_circuit_status(self, circuit, install_stage: str):
         """
         circuit status is planned if provisioning or active if installed
         """
@@ -424,7 +501,7 @@ class CircuitCheckingScript(Script):
         """
         circuit has tenant
         """
-        self._has_tenant(circuit, 'circuit')
+        self.has_tenant(circuit, 'circuit')
 
 
     def test_circuit_type(self, circuit):
@@ -443,7 +520,7 @@ class CircuitCheckingScript(Script):
         """
         cpe has an uploaded image
         """
-        self._has_image(cpe)
+        self.has_image(cpe)
 
 
     def test_cpe_ipaddr(self, cpe):
@@ -524,11 +601,11 @@ class CircuitCheckingScript(Script):
         """
         cpe has site and location
         """
-        if self._has_site(cpe, 'site'):
-            self._has_location(cpe, 'location')
+        if self.has_site(cpe, 'site'):
+            self.has_location(cpe, 'location')
 
 
-    def test_cpe_status(self, cpe, install_stage):
+    def test_cpe_status(self, cpe, install_stage: str):
         """
         cpe status is staged if provisioning or active if installed
         """
@@ -555,7 +632,7 @@ class CircuitCheckingScript(Script):
         """
         cpe has tenant
         """
-        self._has_tenant(cpe, 'cpe')
+        self.has_tenant(cpe, 'cpe')
 
 
     def test_cpe_type(self, cpe):
@@ -573,6 +650,24 @@ class CircuitCheckingScript(Script):
             )
 
 
+    def test_ip_mask(self, cpe):
+        """
+        ip address is /32
+        """
+        ip_addr = cpe.primary_ip4
+        if not ip_addr:
+            return
+        subnet_mask = str(ip_addr).split('/')[1]
+        if subnet_mask != '32':
+            self.log_failure(
+                f"{ip_addr} is not a /32"
+            )
+        else:
+            self.log_success(
+                f"ip is a /32"
+            )
+
+
     def test_libre_id(self, cpe):
         """
         cpe has a libre id
@@ -586,11 +681,39 @@ class CircuitCheckingScript(Script):
                 f"device has libre id: {cpe.cf['libre_id']}"
             )
 
+
+    def test_vlan_cpe(self, vlan, circuit):
+        """
+        cpe has untagged vlan on its Y-ETH interface
+        """
+        cpe = self.get_cpe(circuit)
+        if not cpe:
+            return
+
+        self.has_vlan(cpe, 'Y-ETH', vlan, 'untagged_vlan')
+
+
+    def test_vlan_site(self, vlan):
+        """
+        vlan has a site
+        """
+        self.has_site(vlan, 'vlan')
+
+
+    def test_vlan_svi(self, vlan, distribution_switch):
+        """
+        svi is correctly named and exists untagged on distribution switch
+        """
+        svi_name = 'Vlan' + str(vlan.vid)
+
+        self.has_vlan(distribution_switch, svi_name, vlan, 'untagged_vlan')
+
+
     def test_vlan_tenant(self, vlan):
         """
         cpe has tenant
         """
-        self._has_tenant(vlan, 'vlan')
+        self.has_tenant(vlan, 'vlan')
 
 
     def test_z_termination(self, circuit):
@@ -613,11 +736,11 @@ class CircuitCheckingScript(Script):
                 )
             elif not str(link_peer.name) == 'Y-ETH':
                 self.log_failure(
-                    f"interface is type {link_peer.name}, should be Y-ETH"
+                    f"cpe interface is type {link_peer.name}, should be Y-ETH"
                 )
             else:
                 self.log_success(
-                    f'z end termination device has a valid cpe '
+                    f'z end termination has a valid cpe '
                     'role',
                 )
             return link_peer
@@ -628,6 +751,8 @@ class CircuitCheckingScript(Script):
         script logic
         """
         circuit = data['circuit']
+        architecture = data['architecture']
+        distribution_switch = data['distribution_switch']
         install_stage = data['install_stage']
         self.log_info(f"{install_stage}")
 
@@ -640,30 +765,48 @@ class CircuitCheckingScript(Script):
 
             """circuit and termination checks"""
             self.test_circuit_ref(circuit)
+            self.test_circuit_status(circuit, install_stage)
             self.test_circuit_tenant(circuit)
             self.test_circuit_type(circuit)
             self.test_circuit_provider(circuit)
             self.test_circuit_speeds(circuit)
-            self.test_a_termination(circuit)
-            link_peer = self.test_z_termination(circuit)
-            self.test_circuit_status(circuit, install_stage)
+            self.test_a_termination(circuit, architecture)
+            self.test_z_termination(circuit)
 
             """cpe checks"""
-            if link_peer:
-                cpe = link_peer.device
+            cpe = self.get_cpe(circuit)
+            if cpe:
                 self.test_cpe_tenant(cpe)
                 self.test_cpe_site_and_location(cpe)
                 self.test_cpe_type(cpe)
                 self.test_cpe_serial(cpe)
-                self.test_cpe_ipaddr(cpe)
                 self.test_cpe_platform(cpe)
                 self.test_cpe_role(cpe)
                 self.test_circuit_status(circuit, install_stage)
+
+                """ip address"""
+                self.test_cpe_ipaddr(cpe)
+                self.test_ip_mask(cpe)
 
             """vlan checks"""
             vlan = self.get_vlan(circuit)
             if vlan:
                 self.test_vlan_tenant(vlan)
+                self.test_vlan_site(vlan)
+                self.test_vlan_cpe(vlan, circuit)
+                self.test_vlan_svi(vlan, distribution_switch)
+
+
+            if architecture == 'copper_cisco':
+                ...
+            if architecture == 'gpon_ubiquity':
+                ...
+            if architecture == 'gpon_zyxel':
+                ...
+            if architecture == 'gpen_mikrotik':
+                ...
+            if architecture == 'wifi':
+                ...
 
 
         elif install_stage == 'installed':
@@ -673,6 +816,18 @@ class CircuitCheckingScript(Script):
             self.test_libre_id(cpe)
             self.test_cpe_image(cpe)
             self.test_circuit_status(circuit, install_stage)
+
+
+            if architecture == 'copper_cisco':
+                ...
+            if architecture == 'gpon_ubiquity':
+                ...
+            if architecture == 'gpon_zyxel':
+                ...
+            if architecture == 'gpen_mikrotik':
+                ...
+            if architecture == 'wifi':
+                ...
 
 
         """complete"""
